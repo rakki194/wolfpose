@@ -263,6 +263,35 @@ class OpenposeObject {
         this.connections.forEach(c => {
             this.canvas?.add(c)
         });
+
+        this.updateSpline();
+        
+        // Add event listeners to update spline when keypoints move
+        this.keypoints.forEach(keypoint => {
+            keypoint.on('moving', this.updateSpline.bind(this));
+            keypoint.on('moved', this.updateSpline.bind(this));
+        });
+        
+        // Create a proxy to monitor visibility changes
+        const self = this;
+        const originalDescriptor = Object.getOwnPropertyDescriptor(OpenposeObject.prototype, 'visible');
+        
+        if (originalDescriptor && originalDescriptor.set) {
+            const originalSetter = originalDescriptor.set;
+            
+            Object.defineProperty(this, 'visible', {
+                set(value) {
+                    originalSetter.call(this, value);
+                    if (self.tailPath) {
+                        self.tailPath.visible = value;
+                        if (self.canvas) {
+                            self.canvas.renderAll();
+                        }
+                    }
+                },
+                get: originalDescriptor.get
+            });
+        }
     }
 
     removeFromCanvas() {
@@ -410,6 +439,83 @@ class OpenposeObject {
                 counterpart.updateConnections(IDENTITY_MATRIX);
             }
         });
+    }
+
+    updateSpline() {
+        if (!this.canvas) return;
+        
+        // Remove existing spline path if it exists
+        if (this.tailPath) {
+            this.canvas.remove(toRaw(this.tailPath));
+            this.tailPath = null;
+        }
+        
+        // Create a new bezier curve path
+        const points = this.keypoints.map(kp => ({ x: kp.x, y: kp.y }));
+        
+        if (points.length < 2) return;
+        
+        // Generate the SVG path string for a smooth bezier curve through all points
+        let pathString = `M ${points[0].x} ${points[0].y}`;
+        
+        // Add cubic bezier curves between points
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = points[i];
+            const p1 = points[i + 1];
+            
+            // For cubic bezier, we need control points. Let's compute them.
+            let cp1x, cp1y, cp2x, cp2y;
+            
+            if (i === 0) {
+                // First segment - control points based on the first two points
+                const dx = p1.x - p0.x;
+                const dy = p1.y - p0.y;
+                cp1x = p0.x + dx / 3;
+                cp1y = p0.y + dy / 3;
+                cp2x = p1.x - dx / 3;
+                cp2y = p1.y - dy / 3;
+            } else if (i === points.length - 2) {
+                // Last segment - control points based on the last two points
+                const dx = p1.x - p0.x;
+                const dy = p1.y - p0.y;
+                cp1x = p0.x + dx / 3;
+                cp1y = p0.y + dy / 3;
+                cp2x = p1.x - dx / 3;
+                cp2y = p1.y - dy / 3;
+            } else {
+                // Middle segments - control points based on the surrounding points
+                const prev = points[i - 1];
+                const next = points[i + 2] || p1;
+                
+                // Calculate control points based on adjacent points
+                cp1x = p0.x + (p1.x - prev.x) / 4;
+                cp1y = p0.y + (p1.y - prev.y) / 4;
+                cp2x = p1.x - (next.x - p0.x) / 4;
+                cp2y = p1.y - (next.y - p0.y) / 4;
+            }
+            
+            pathString += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p1.x} ${p1.y}`;
+        }
+        
+        // Create the path object
+        this.tailPath = markRaw(new fabric.Path(pathString, {
+            fill: '',
+            stroke: this.color,
+            strokeWidth: 4, // Same as body connections
+            selectable: false,
+            evented: false,
+            opacity: 0.7,
+            visible: this.visible // Set initial visibility based on object visibility
+        }));
+        
+        // Add the path to the canvas and move it to the bottom
+        this.canvas.add(this.tailPath);
+        this.canvas.sendToBack(this.tailPath);
+        
+        // Ensure the openpose canvas is at the very bottom
+        if (this.openposeCanvas) {
+            this.canvas.sendToBack(this.openposeCanvas);
+        }
     }
 };
 
@@ -636,13 +742,219 @@ class OpenposeFace extends OpenposeObject {
     }
 
     static create(rawKeypoints: [number, number, number][]): OpenposeFace | undefined {
-        if (rawKeypoints.length < OpenposeFace.keypoint_names.length) {
-            console.warn(
-                `Wrong number of keypoints for openpose face. Expect ${OpenposeFace.keypoint_names.length} but got ${rawKeypoints.length}.`)
+        if (!rawKeypoints || rawKeypoints.length === 0) {
             return undefined;
         }
-        rawKeypoints.slice(0, OpenposeFace.keypoint_names.length);
+        
+        if (rawKeypoints.length < OpenposeFace.keypoint_names.length) {
+            console.warn(
+                `Wrong number of keypoints for openpose face. Expect ${OpenposeFace.keypoint_names.length} but got ${rawKeypoints.length}.`);
+            // Pad the array if we don't have enough keypoints
+            const padding = Array(OpenposeFace.keypoint_names.length - rawKeypoints.length).fill([0, 0, 0]);
+            rawKeypoints = [...rawKeypoints, ...padding];
+        } else if (rawKeypoints.length > OpenposeFace.keypoint_names.length) {
+            // Slice if we have too many
+            rawKeypoints = rawKeypoints.slice(0, OpenposeFace.keypoint_names.length);
+        }
+        
         return new OpenposeFace(rawKeypoints);
+    }
+}
+
+class OpenposeTail extends OpenposeObject {
+    static keypoint_names: string[] = [
+        'Tail-Base', 'Tail-Control1', 'Tail-Control2', 'Tail-Control3', 'Tail-Tip'
+    ];
+    
+    static keypoint_connections: [number, number][] = [
+        [0, 1], [1, 2], [2, 3], [3, 4]
+    ];
+    
+    tailColor: string;
+    tailPath: fabric.Path | null;
+
+    constructor(rawKeypoints: [number, number, number][], color: string = 'rgb(255, 165, 0)') {
+        // Create keypoints for control points
+        const keypoints = rawKeypoints.map((keypoint, i) => {
+            return new OpenposeKeypoint2D(
+                keypoint[0], 
+                keypoint[1], 
+                keypoint[2], 
+                color, 
+                OpenposeTail.keypoint_names[i], 
+                keypoint[2],
+                /* constant_radius= */ 4 // Make keypoints more visible
+            );
+        });
+
+        // Create straight line connections for visualization during editing
+        // but with 0 opacity to make them invisible
+        const connections: OpenposeConnection[] = [];
+        OpenposeTail.keypoint_connections.forEach(([i, j]) => {
+            connections.push(new OpenposeConnection(
+                keypoints[i], 
+                keypoints[j], 
+                color, 
+                /* opacity= */ 0, // Make connections completely invisible
+                /* strokeWidth= */ 0
+            ));
+        });
+
+        super(keypoints, connections);
+        this.tailColor = color;
+        this.tailPath = null;
+        this.flippable = true;
+    }
+
+    static create(rawKeypoints: [number, number, number][] | undefined = undefined, color: string = 'rgb(255, 165, 0)'): OpenposeTail {
+        // Default placement if no keypoints provided
+        if (!rawKeypoints || rawKeypoints.length === 0 || rawKeypoints.length < 5) {
+            // Create a default S-curved tail for better visual appeal
+            rawKeypoints = [
+                [100, 400, 1],   // Base
+                [130, 380, 1],   // Control1
+                [150, 350, 1],   // Control2
+                [140, 330, 1],   // Control3
+                [130, 310, 1]    // Tip
+            ];
+        }
+
+        return new OpenposeTail(rawKeypoints, color);
+    }
+
+    addToCanvas(openposeCanvas: fabric.Rect) {
+        super.addToCanvas(openposeCanvas);
+        
+        // Add event listeners to update spline when keypoints move
+        this.keypoints.forEach(keypoint => {
+            keypoint.on('moving', this.updateTailPath.bind(this));
+            keypoint.on('moved', this.updateTailPath.bind(this));
+        });
+        
+        // Initial spline creation
+        this.updateTailPath();
+        
+        // Override the visible property setter
+        const self = this;
+        const originalSet = Object.getOwnPropertyDescriptor(this, 'visible')?.set;
+        if (originalSet) {
+            Object.defineProperty(this, 'visible', {
+                set(value) {
+                    originalSet.call(this, value);
+                    if ((self as any).tailPath) {
+                        (self as any).tailPath.set('visible', value);
+                        if (self.canvas) {
+                            self.canvas.renderAll();
+                        }
+                    }
+                },
+                get: Object.getOwnPropertyDescriptor(this, 'visible')?.get
+            });
+        }
+    }
+
+    removeFromCanvas() {
+        if ((this as any).tailPath && this.canvas) {
+            this.canvas.remove(toRaw((this as any).tailPath));
+            (this as any).tailPath = null;
+        }
+        super.removeFromCanvas();
+    }
+
+    updateTailPath() {
+        if (!this.canvas) return;
+        
+        // Remove existing spline path if it exists
+        if ((this as any).tailPath) {
+            this.canvas.remove(toRaw((this as any).tailPath));
+            (this as any).tailPath = null;
+        }
+        
+        // Create a new bezier curve path
+        const points = this.keypoints.map(kp => ({ x: kp.x, y: kp.y }));
+        
+        if (points.length < 2) return;
+        
+        // Generate the SVG path string for a smooth bezier curve through all points
+        let pathString = `M ${points[0].x} ${points[0].y}`;
+        
+        // Add cubic bezier curves between points
+        for (let i = 0; i < points.length - 1; i++) {
+            const p0 = points[i];
+            const p1 = points[i + 1];
+            
+            // For cubic bezier, we need control points. Let's compute them.
+            let cp1x, cp1y, cp2x, cp2y;
+            
+            if (i === 0) {
+                // First segment - control points based on the first two points
+                const dx = p1.x - p0.x;
+                const dy = p1.y - p0.y;
+                cp1x = p0.x + dx / 3;
+                cp1y = p0.y + dy / 3;
+                cp2x = p1.x - dx / 3;
+                cp2y = p1.y - dy / 3;
+            } else if (i === points.length - 2) {
+                // Last segment - control points based on the last two points
+                const dx = p1.x - p0.x;
+                const dy = p1.y - p0.y;
+                cp1x = p0.x + dx / 3;
+                cp1y = p0.y + dy / 3;
+                cp2x = p1.x - dx / 3;
+                cp2y = p1.y - dy / 3;
+            } else {
+                // Middle segments - control points based on the surrounding points
+                const prev = points[i - 1];
+                const next = points[i + 2] || p1;
+                
+                // Calculate control points based on adjacent points
+                cp1x = p0.x + (p1.x - prev.x) / 4;
+                cp1y = p0.y + (p1.y - prev.y) / 4;
+                cp2x = p1.x - (next.x - p0.x) / 4;
+                cp2y = p1.y - (next.y - p0.y) / 4;
+            }
+            
+            pathString += ` C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p1.x} ${p1.y}`;
+        }
+        
+        // Create the path object
+        (this as any).tailPath = markRaw(new fabric.Path(pathString, {
+            fill: '',
+            stroke: (this as any).tailColor,
+            strokeWidth: 6, // Increase stroke width to make it more visible
+            strokeLineCap: 'round',  // Round the ends for a smoother appearance
+            strokeLineJoin: 'round', // Round the joins for a smoother appearance
+            selectable: false,
+            evented: false,
+            opacity: 1.0, // Full opacity for the spline
+            visible: this.visible // Set initial visibility based on object visibility
+        }));
+        
+        // Add the path to the canvas and move it to the bottom
+        this.canvas.add((this as any).tailPath);
+        this.canvas.sendToBack((this as any).tailPath);
+        
+        // Ensure the openpose canvas is at the very bottom
+        if (this.openposeCanvas) {
+            this.canvas.sendToBack(this.openposeCanvas);
+        }
+    }
+
+    // Override methods to ensure the tail path is updated
+    lockObject() {
+        super.lockObject();
+        this.updateTailPath();
+    }
+
+    unlockObject() {
+        super.unlockObject();
+        this.updateTailPath();
+    }
+
+    // When the object is flipped, update the tail path
+    flip() {
+        super.flip();
+        this.updateTailPath();
     }
 }
 
@@ -650,6 +962,7 @@ enum OpenposeBodyPart {
     LEFT_HAND = 'left_hand',
     RIGHT_HAND = 'right_hand',
     FACE = 'face',
+    TAIL = 'tail',
 };
 
 class OpenposePerson {
@@ -660,18 +973,21 @@ class OpenposePerson {
     left_hand: OpenposeHand | undefined;
     right_hand: OpenposeHand | undefined;
     face: OpenposeFace | undefined;
+    tails: OpenposeTail[];
     id: number;
     visible: boolean;
 
     constructor(name: string | null, body: OpenposeBody | OpenposeAnimal,
         left_hand: OpenposeHand | undefined = undefined,
         right_hand: OpenposeHand | undefined = undefined,
-        face: OpenposeFace | undefined = undefined
+        face: OpenposeFace | undefined = undefined,
+        tails: OpenposeTail[] = []
     ) {
         this.body = body;
         this.left_hand = left_hand;
         this.right_hand = right_hand;
         this.face = face;
+        this.tails = tails;
         this.id = OpenposePerson.id++;
         this.visible = true;
         this.name = name == null ? `Person ${this.id}` : name;
@@ -682,15 +998,15 @@ class OpenposePerson {
     }
 
     addToCanvas(openposeCanvas: fabric.Rect) {
-        [this.body, this.left_hand, this.right_hand, this.face].forEach(o => o?.addToCanvas(openposeCanvas));
+        [this.body, this.left_hand, this.right_hand, this.face, ...this.tails].forEach(o => o?.addToCanvas(openposeCanvas));
     }
 
     removeFromCanvas() {
-        [this.body, this.left_hand, this.right_hand, this.face].forEach(o => o?.removeFromCanvas());
+        [this.body, this.left_hand, this.right_hand, this.face, ...this.tails].forEach(o => o?.removeFromCanvas());
     }
 
     allKeypoints(): OpenposeKeypoint2D[] {
-        return _.flatten([this.body, this.left_hand, this.right_hand, this.face]
+        return _.flatten([this.body, this.left_hand, this.right_hand, this.face, ...this.tails]
             .map(o => o === undefined ? [] : o.keypoints));
     }
 
@@ -707,6 +1023,7 @@ class OpenposePerson {
             hand_right_keypoints_2d: this.right_hand?.serialize(),
             hand_left_keypoints_2d: this.left_hand?.serialize(),
             face_keypoints_2d: this.face?.serialize(),
+            tails: this.tails.map(tail => tail.serialize())
         } as IOpenposePersonJson;
     }
 
@@ -788,6 +1105,23 @@ class OpenposePerson {
     public attachFace(face: OpenposeFace) {
         // TODO: adjust face location.
         this.face = face;
+    }
+
+    public addTail(color: string = 'rgb(255, 165, 0)'): OpenposeTail {
+        const tail = OpenposeTail.create(undefined, color);
+        this.tails.push(tail);
+        if (this.body.canvas) {
+            tail.addToCanvas(this.body.openposeCanvas!);
+        }
+        return tail;
+    }
+
+    public removeTail(tail: OpenposeTail) {
+        const index = this.tails.indexOf(tail);
+        if (index !== -1) {
+            tail.removeFromCanvas();
+            this.tails.splice(index, 1);
+        }
     }
 };
 
@@ -880,6 +1214,7 @@ interface IOpenposePersonJson {
     hand_right_keypoints_2d: number[] | null,
     hand_left_keypoints_2d: number[] | null,
     face_keypoints_2d: number[] | null,
+    tails?: number[][],
 };
 
 interface IOpenposeJson {
@@ -899,6 +1234,7 @@ export {
     OpenposeFace,
     OpenposeBodyPart,
     OpenposeAnimal,
+    OpenposeTail,
 };
 
 export type {

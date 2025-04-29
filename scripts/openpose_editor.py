@@ -22,7 +22,7 @@ class Item(BaseModel):
 
 
 EXTENSION_DIR = scripts.basedir()
-DIST_DIR = os.path.join(EXTENSION_DIR, 'dist')
+DIST_DIR = os.path.join(EXTENSION_DIR, "dist")
 
 
 def get_latest_release(owner, repo) -> Optional[str]:
@@ -79,17 +79,17 @@ def download_latest_release(owner, repo):
 def need_update(current_version: Optional[str], package_version: str) -> bool:
     if current_version is None:
         return True
-    
+
     def parse_version(version: str):
-        return tuple(int(num) for num in version[1:].split('.'))
-    
+        return tuple(int(num) for num in version[1:].split("."))
+
     return parse_version(current_version) < parse_version(package_version)
 
 
 def update_app():
     """Attempts to update the application to latest version"""
-    owner = "huchenlei"
-    repo = "sd-webui-openpose-editor"
+    owner = "rakki194"
+    repo = "wolfpose"
 
     package_version = get_version_from_package_json()
     current_version = get_current_release()

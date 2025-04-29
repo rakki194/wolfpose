@@ -40,13 +40,9 @@ export default {
             <a-page-header>
                 <template #title>
                     <a-space>
-                        <a href="https://github.com/huchenlei/sd-webui-openpose-editor"
+                        <a href="https://github.com/rakki194/wolfpose"
                             target="_blank"><github-outlined /></a>
-                        <span><b>SD-WEBUI-OPENPOSE-EDITOR</b></span>
-                        <a v-if="stars !== null" href="https://github.com/huchenlei/sd-webui-openpose-editor/stargazers"
-                            target="_blank">
-                            {{ stars }} <star-outlined />
-                        </a>
+                          <span><b>WOLFPOSE</b></span>
                     </a-space>
                 </template>
             </a-page-header>

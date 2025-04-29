@@ -14,6 +14,7 @@ import {
   type IOpenposeJson,
   OpenposeBodyPart,
   OpenposeAnimal,
+  OpenposeTail,
 } from './Openpose';
 import type { UploadFile } from 'ant-design-vue';
 import LockSwitch from './components/LockSwitch.vue';
@@ -578,6 +579,9 @@ export default defineComponent({
         case OpenposeBodyPart.FACE:
           person.attachFace(target as OpenposeFace);
           break;
+        case OpenposeBodyPart.TAIL:
+          // Tails are already added to the person object, no need to attach
+          break;
       }
       this.canvas?.renderAll();
     },
@@ -596,6 +600,9 @@ export default defineComponent({
           target = person.face;
           person.face = undefined;
           break;
+        case OpenposeBodyPart.TAIL:
+          // Handled separately for tails
+          return;
       }
 
       if (!target) return;
@@ -820,7 +827,8 @@ export default defineComponent({
           // If body is malformatted, no need to render face/hand.
           return undefined;
         }
-        return new OpenposePerson(null,
+        
+        const person = new OpenposePerson(null,
           body,
           personJson.hand_left_keypoints_2d ?
             OpenposeHand.create(preprocessPoints(personJson.hand_left_keypoints_2d, canvasWidth, canvasHeight)) : undefined,
@@ -828,7 +836,21 @@ export default defineComponent({
             OpenposeHand.create(preprocessPoints(personJson.hand_right_keypoints_2d, canvasWidth, canvasHeight)) : undefined,
           personJson.face_keypoints_2d ?
             OpenposeFace.create(preprocessPoints(personJson.face_keypoints_2d, canvasWidth, canvasHeight)) : undefined,
-        )
+        );
+        
+        // Add tails if present in the JSON
+        if (personJson.tails) {
+          personJson.tails.forEach((tailPoints, index) => {
+            const color = this.getTailColorByIndex(index);
+            const tail = OpenposeTail.create(
+              preprocessPoints(tailPoints, canvasWidth, canvasHeight),
+              color
+            );
+            person.tails.push(tail);
+          });
+        }
+        
+        return person;
       }).concat(
         (poseJson.animals || []).map((animal): OpenposePerson | undefined => {
           const openposeAnimal = OpenposeAnimal.create(preprocessPoints(animal, canvasWidth, canvasHeight))
@@ -1014,6 +1036,36 @@ export default defineComponent({
         link.click();
       });
     },
+    // Add a method to add a tail to a person
+    addTail(person: OpenposePerson, color: string) {
+      const tail = person.addTail(color);
+      tail.keypoints.forEach(keypoint => {
+        this.keypointMap.set(keypoint.id, reactive(keypoint));
+      });
+      this.canvas?.renderAll();
+      return tail;
+    },
+    
+    // Remove a specific tail from a person
+    removeTail(person: OpenposePerson, tail: OpenposeTail) {
+      person.removeTail(tail);
+      tail.keypoints.forEach(keypoint => {
+        this.keypointMap.delete(keypoint.id);
+      });
+      this.canvas?.renderAll();
+    },
+    // Get a color for a tail based on its index
+    getTailColorByIndex(index: number): string {
+      const colors = [
+        'rgb(255, 165, 0)',  // Orange
+        'rgb(0, 127, 255)',  // Blue
+        'rgb(0, 200, 0)',    // Green
+        'rgb(180, 0, 255)',  // Purple
+        'rgb(255, 0, 0)',    // Red
+        'rgb(255, 255, 0)',  // Yellow
+      ];
+      return colors[index % colors.length];
+    },
   },
   components: {
     PlusSquareOutlined,
@@ -1136,6 +1188,26 @@ export default defineComponent({
                 </a-button>
               </a-upload>
             </div>
+            
+            <!-- Tail controls -->
+            <div class="tail-controls">
+              <a-divider>{{ $t('ui.tails') }}</a-divider>
+              <a-space>
+                <a-button @click="addTail(person, 'rgb(255, 165, 0)')" style="background-color: rgb(255, 165, 0); color: black">
+                  {{ $t('ui.addOrangeTail') }}
+                </a-button>
+                <a-button @click="addTail(person, 'rgb(0, 127, 255)')" style="background-color: rgb(0, 127, 255); color: white">
+                  {{ $t('ui.addBlueTail') }}
+                </a-button>
+                <a-button @click="addTail(person, 'rgb(0, 200, 0)')" style="background-color: rgb(0, 200, 0); color: black">
+                  {{ $t('ui.addGreenTail') }}
+                </a-button>
+                <a-button @click="addTail(person, 'rgb(180, 0, 255)')" style="background-color: rgb(180, 0, 255); color: white">
+                  {{ $t('ui.addPurpleTail') }}
+                </a-button>
+              </a-space>
+            </div>
+            
             <a-collapse accordion :activeKey="activeBodyPart" @update:activeKey="updateActiveBodyPart($event, person)">
               <OpenposeObjectPanel v-if="person.left_hand !== undefined" :object="person.left_hand"
                 :display_name="'Left Hand'" @removeObject="removeObject(person, OpenposeBodyPart.LEFT_HAND)"
@@ -1145,6 +1217,10 @@ export default defineComponent({
                 :key="OpenposeBodyPart.RIGHT_HAND" />
               <OpenposeObjectPanel v-if="person.face !== undefined" :object="person.face" :display_name="'Face'"
                 @removeObject="removeObject(person, OpenposeBodyPart.FACE)" :key="OpenposeBodyPart.FACE" />
+                
+              <!-- Render tail panels -->
+              <OpenposeObjectPanel v-for="(tail, tailIndex) in person.tails" :key="'tail-' + tailIndex"
+                :object="tail" :display_name="'Tail ' + (tailIndex + 1)" @removeObject="removeTail(person, tail)" />
             </a-collapse>
           </template>
         </OpenposeObjectPanel>
@@ -1161,5 +1237,46 @@ export default defineComponent({
 .hidden {
   opacity: 50%;
   text-decoration: line-through;
+}
+
+.tail-controls {
+  margin: 10px 0;
+}
+
+.tail-controls .ant-btn {
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  margin-right: 5px;
+  margin-bottom: 5px;
+}
+
+.close-icon {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  cursor: pointer;
+}
+
+.unjam-button {
+  cursor: pointer;
+  margin-left: 5px;
+}
+
+.image-thumbnail {
+  max-width: 50px;
+  max-height: 50px;
+  margin-right: 10px;
+}
+
+.uploaded-file-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.scale-ratio-input {
+  margin-left: auto;
+  width: 180px;
 }
 </style>

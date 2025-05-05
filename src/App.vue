@@ -548,7 +548,7 @@ export default defineComponent({
       this.canvas?.renderAll();
     },
     addDefaultObject(person: OpenposePerson, part: OpenposeBodyPart) {
-      let target: OpenposeObject;
+      let target: OpenposeObject | undefined;
       switch (part) {
         case OpenposeBodyPart.LEFT_HAND:
           target = new OpenposeHand(default_left_hand_keypoints);
@@ -560,6 +560,10 @@ export default defineComponent({
           person.face = new OpenposeFace(default_face_keypoints);
           target = person.face;
           break;
+      }
+      if (target === undefined) {
+        // If part is not one of the handled cases, do nothing.
+        return;
       }
       this.addObject(person, part, target);
     },
